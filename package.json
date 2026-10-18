@@ -1,0 +1,47 @@
+{
+  "name": "@mxalbert/opencode-prompt-cache-warmer",
+  "version": "1.0.0",
+  "description": "OpenCode v2 plugin that keeps provider prompt caches warm by replaying the last assembled request.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./server": "./dist/server/index.js"
+  },
+  "files": [
+    "dist",
+    "server.js"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outfile dist/server/index.js --target node --format esm && bun build src/index.ts --outfile dist/index.js --target node --format esm",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run typecheck && bun run build && bun test"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "prompt-cache",
+    "caching"
+  ],
+  "author": "Albert Chang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mxalbert1996/opencode-prompt-cache-warmer.git"
+  },
+  "homepage": "https://github.com/mxalbert1996/opencode-prompt-cache-warmer#readme",
+  "bugs": {
+    "url": "https://github.com/mxalbert1996/opencode-prompt-cache-warmer/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@opencode/ai": "2.0.32",
+    "@opencode/plugin": "2.0.32",
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.2"
+  }
+}
