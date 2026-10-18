@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { DEFAULT_DURATION, DEFAULT_INTERVAL, DEFAULT_PROMPT, parseDuration, parseOptions } from "./config.js"
-import type { ContextEvent, GenerateEvent } from "./warmer.js"
-import { Warmer, invalidatesTranscript, modelKey } from "./warmer.js"
+import { DEFAULT_DURATION, DEFAULT_INTERVAL, DEFAULT_PROMPT, parseDuration, parseModelRules, parseOptions } from "./config.js"
+import type { ContextEvent, GenerateEvent, ModelRule } from "./warmer.js"
+import { Warmer, invalidatesTranscript, modelKey, shouldWarm } from "./warmer.js"
 
 const model = { providerID: "anthropic", id: "claude-sonnet-5" } as const
 
@@ -42,7 +42,13 @@ interface Harness {
 }
 
 function harness(
-  overrides: Partial<{ interval: number; duration: number; now: () => number; warm: () => Promise<void> }> = {},
+  overrides: Partial<{
+    interval: number
+    duration: number
+    models: readonly ModelRule[]
+    now: () => number
+    warm: () => Promise<void>
+  }> = {},
 ): Harness {
   const calls: Array<{ sessionID: string; prompt: string }> = []
   let queued: GenerateEvent | undefined
@@ -62,6 +68,7 @@ function harness(
     prompt: DEFAULT_PROMPT,
     interval: overrides.interval ?? 60_000,
     duration: overrides.duration ?? DEFAULT_DURATION,
+    models: overrides.models,
     warm: async (sessionID, prompt) => {
       calls.push({ sessionID, prompt })
       if (queued) result.instance.replay(queued)
@@ -238,7 +245,7 @@ describe("identity checks", () => {
   test("skips a snapshot captured for another model", async () => {
     const { instance, inFlight } = harness()
     instance.capture(contextEvent())
-    const event = generateEvent({ model: { providerID: "magpie", id: "other-model" } as GenerateEvent["model"] })
+    const event = generateEvent({ model: { providerID: "anthropic", id: "other-model" } as GenerateEvent["model"] })
     const before = structuredClone(event)
     await inFlight(event)
     expect(event).toEqual(before)
@@ -268,6 +275,88 @@ describe("identity checks", () => {
   test("model keys include the variant", () => {
     expect(modelKey({ ...model } as ContextEvent["model"])).toBe("anthropic/claude-sonnet-5#")
     expect(modelKey({ ...model, variant: "high" } as ContextEvent["model"])).toBe("anthropic/claude-sonnet-5#high")
+  })
+})
+
+describe("model rules", () => {
+  const rule = (pattern: string, exclude = false): ModelRule => ({ pattern, exclude })
+  const ref = (providerID: string, id: string, variant?: string) =>
+    ({ providerID, id, variant }) as unknown as ContextEvent["model"]
+  const base = ref("anthropic", "claude-sonnet-5")
+
+  test("warms everything when no rules are configured", () => {
+    expect(shouldWarm(base, undefined)).toBe(true)
+    expect(shouldWarm(base, [])).toBe(true)
+  })
+
+  test("matches on the full key, the provider-qualified id, and the bare id", () => {
+    expect(shouldWarm(base, [rule("anthropic/claude-sonnet-5#")])).toBe(true)
+    expect(shouldWarm(base, [rule("anthropic/claude-sonnet-5")])).toBe(true)
+    expect(shouldWarm(base, [rule("claude-sonnet-5")])).toBe(true)
+    expect(shouldWarm(base, [rule("claude-sonnet-5#high")])).toBe(false)
+  })
+
+  test("distinguishes variants", () => {
+    const high = ref("anthropic", "claude-sonnet-5", "high")
+    expect(shouldWarm(high, [rule("anthropic/claude-sonnet-5#high")])).toBe(true)
+    expect(shouldWarm(high, [rule("anthropic/claude-sonnet-5#")])).toBe(false)
+  })
+
+  test("supports wildcards and ignores case", () => {
+    expect(shouldWarm(base, [rule("anthropic/*")])).toBe(true)
+    expect(shouldWarm(base, [rule("*claude*")])).toBe(true)
+    expect(shouldWarm(base, [rule("ANTHROPIC/claude-sonnet-5")])).toBe(true)
+    expect(shouldWarm(base, [rule("anthropic/claude-sonnet-?")])).toBe(true)
+    expect(shouldWarm(base, [rule("google/*")])).toBe(false)
+  })
+
+  test("treats a dot in a pattern literally", () => {
+    expect(shouldWarm(base, [rule("anthropic/claude.sonnet.4")])).toBe(false)
+  })
+
+  test("treats other regex metacharacters literally without throwing", () => {
+    for (const pattern of ["[", "{", "(", "\\", "$^", "a+b", "{2,3}", "|", ")?("]) {
+      expect(() => shouldWarm(base, [rule(pattern)])).not.toThrow()
+      expect(shouldWarm(base, [rule(pattern)])).toBe(false)
+    }
+    expect(shouldWarm(ref("anthropic", "a+b"), [rule("anthropic/a+b")])).toBe(true)
+  })
+
+  test("only warms models an include rule matches", () => {
+    const rules = [rule("anthropic/*")]
+    expect(shouldWarm(base, rules)).toBe(true)
+    expect(shouldWarm(ref("other", "m"), rules)).toBe(false)
+  })
+
+  test("warms everything except excluded models", () => {
+    const rules = [rule("anthropic/claude-sonnet-5", true)]
+    expect(shouldWarm(base, rules)).toBe(false)
+    expect(shouldWarm(ref("anthropic", "claude-haiku"), rules)).toBe(true)
+  })
+
+  test("lets an exclusion win over an include", () => {
+    const rules = [rule("anthropic/*"), rule("anthropic/claude-sonnet-5", true)]
+    expect(shouldWarm(base, rules)).toBe(false)
+  })
+
+  test("does not capture a session on an excluded model", () => {
+    const { instance } = harness({ models: [rule("anthropic/claude-sonnet-5", true)] })
+    instance.capture(contextEvent())
+    expect(instance.has("ses_test")).toBe(false)
+    instance.dispose()
+  })
+
+  test("stops warming a session that switches to an excluded model", async () => {
+    const { instance, inFlight } = harness({ models: [rule("anthropic/claude-sonnet-5", true)] })
+    instance.capture(contextEvent({ model: ref("anthropic", "claude-haiku") }))
+    expect(instance.has("ses_test")).toBe(true)
+    instance.capture(contextEvent())
+    expect(instance.has("ses_test")).toBe(false)
+
+    const event = generateEvent()
+    await inFlight(event)
+    expect(event.messages).toHaveLength(1)
+    instance.dispose()
   })
 })
 
@@ -461,10 +550,34 @@ describe("config", () => {
   test("applies defaults and accepts numeric milliseconds", () => {
     expect(parseOptions(undefined)).toEqual({
       ok: true,
-      settings: { prompt: DEFAULT_PROMPT, interval: DEFAULT_INTERVAL, duration: DEFAULT_DURATION },
+      settings: { prompt: DEFAULT_PROMPT, interval: DEFAULT_INTERVAL, duration: DEFAULT_DURATION, models: [] },
     })
     const custom = parseOptions({ prompt: "ping", interval: 1000, duration: "2m" })
-    expect(custom.ok && custom.settings).toEqual({ prompt: "ping", interval: 1000, duration: 120_000 })
+    expect(custom.ok && custom.settings).toEqual({
+      prompt: "ping",
+      interval: 1000,
+      duration: 120_000,
+      models: [],
+    })
+  })
+
+  test("parses model rules from a string or an array", () => {
+    expect(parseModelRules(undefined)).toEqual([])
+    expect(parseModelRules("anthropic/*")).toEqual([{ pattern: "anthropic/*", exclude: false }])
+    expect(parseModelRules(["anthropic/*", " !anthropic/claude-sonnet-5 "])).toEqual([
+      { pattern: "anthropic/*", exclude: false },
+      { pattern: "anthropic/claude-sonnet-5", exclude: true },
+    ])
+  })
+
+  test("rejects malformed model rules", () => {
+    expect(parseModelRules("")).toBeUndefined()
+    expect(parseModelRules("!")).toBeUndefined()
+    expect(parseModelRules(["anthropic/*", 4])).toBeUndefined()
+    expect(parseModelRules({ model: "anthropic/*" })).toBeUndefined()
+    const parsed = parseOptions({ models: ["anthropic/*", null] })
+    expect(parsed.ok).toBe(false)
+    expect(parsed.ok === false && parsed.warning).toContain("models")
   })
 
   test("stays silent when explicitly disabled", () => {

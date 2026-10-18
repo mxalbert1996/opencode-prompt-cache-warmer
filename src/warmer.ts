@@ -19,10 +19,16 @@ interface SessionState {
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
+export interface ModelRule {
+  readonly pattern: string
+  readonly exclude: boolean
+}
+
 export interface WarmerSettings {
   readonly prompt: string
   readonly interval: number
   readonly duration: number
+  readonly models?: readonly ModelRule[]
 }
 
 interface WarmerOptions extends WarmerSettings {
@@ -60,6 +66,23 @@ export function modelKey(model: ContextEvent["model"]): string {
   return `${model.providerID}/${model.id}#${model.variant ?? ""}`
 }
 
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return new RegExp(`^${escaped.replaceAll("\\*", ".*").replaceAll("\\?", ".")}$`, "i")
+}
+
+export function shouldWarm(model: ContextEvent["model"], rules: readonly ModelRule[] | undefined): boolean {
+  if (rules === undefined || rules.length === 0) return true
+  const candidates = [modelKey(model), `${model.providerID}/${model.id}`, model.id]
+  const matches = (rule: ModelRule) => {
+    const matcher = globToRegExp(rule.pattern)
+    return candidates.some((candidate) => matcher.test(candidate))
+  }
+  if (rules.some((rule) => rule.exclude && matches(rule))) return false
+  const included = rules.filter((rule) => !rule.exclude)
+  return included.length === 0 || included.some(matches)
+}
+
 function lastMessageText(messages: GenerateEvent["messages"]): string | undefined {
   const content = messages.at(-1)?.content
   if (!Array.isArray(content)) return
@@ -91,6 +114,10 @@ export class Warmer {
 
   capture(event: ContextEvent): void {
     if (this.disposed) return
+    if (!shouldWarm(event.model, this.options.models)) {
+      this.drop(event.sessionID)
+      return
+    }
     const state = this.state(event.sessionID)
     const at = this.now()
     state.snapshot = {

@@ -55,6 +55,7 @@ simply less useful.
         "enabled": true,
         "interval": "4 minutes",
         "duration": "30 minutes",
+        "models": ["!opencode-go/deepseek-*"],
         "prompt": "This is a keep-alive request. Do not perform any work or use tools. Reply with exactly: OK"
       }
     }
@@ -67,6 +68,7 @@ simply less useful.
 | `prompt`   | see above  | Text of the appended keep-alive message.                                 |
 | `interval` | `4m`       | Idle time before a warm request; also the re-arm delay between warms.    |
 | `duration` | `30m`      | How long after the last real request warming continues before it stops.  |
+| `models`   | all models | Which models to warm. Absent or empty means every model.                 |
 | `enabled`  | `true`     | Set `false` to load the plugin without warming anything.                 |
 
 `interval` and `duration` accept milliseconds as a number or a string with a
@@ -75,12 +77,54 @@ overflowing, or over-long value disables the plugin and logs a warning.
 `interval` is capped at 2,147,483,647 ms (about 24.8 days) because larger
 delays are clamped by the runtime.
 
+### `models`
+
+Some providers hold a prompt cache for hours, so those models gain little from
+warming. Exclude them:
+
+```json
+{
+  "models": ["!opencode-go/deepseek-*", "!openai/*"]
+}
+```
+
+Providers with a short cache TTL are the opposite case — Anthropic's cache
+typically expires in minutes, which is exactly what warming exists to prevent.
+To warm only a select set, use plain patterns instead of a leading `!`:
+
+```json
+{
+  "models": ["anthropic/*"]
+}
+```
+
+A value is a pattern or an array of patterns. `*` matches any run of characters
+and `?` matches one; matching is case-insensitive and a dot is literal. Each
+pattern is tested against three forms of the active model:
+
+- the full key, `providerID/modelID#variant` (for example `anthropic/claude-haiku#high`)
+- the provider-qualified id, `providerID/modelID`
+- the bare model id
+
+A leading `!` marks an exclusion. Exclusions are checked first and always win.
+If any plain pattern is present, a model must match one to be warmed; with no
+plain patterns, every non-excluded model is warmed. An empty list is the same as
+omitting the option. A malformed value — a non-string entry, a blank string, or
+a bare `!` — disables the plugin and logs a warning, the same as an invalid
+`interval`.
+
+The filter is checked when a request is assembled, so a session that switches to
+a skipped model stops scheduling further warms, and switching back resumes after
+the next real request. A warm request that was already dispatched cannot be
+recalled; it completes against the model it was sent for.
+
 ## Behavior
 
 - **Capture** — on every `context` hook run, the assembled `system`, `messages`,
   `options`, `tools`, `agent` and model are recorded for that session, and the
-  session's idle timer restarts. Subagent sessions (`parentID` set) are skipped,
-  and each session's status is cached in a bounded session-status cache.
+  session's idle timer restarts. Subagent sessions (`parentID` set) and sessions
+  whose model the `models` filter excludes are skipped, and each session's status
+  is cached in a bounded session-status cache.
 - **Warm** — after `interval` of inactivity, if the last real request is still
   within `duration`, the plugin calls `session.generate` with the keep-alive
   prompt. A `finally`-balanced in-flight counter lets the `generate` hook

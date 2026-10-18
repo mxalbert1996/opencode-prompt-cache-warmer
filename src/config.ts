@@ -1,15 +1,11 @@
+import type { ModelRule, WarmerSettings } from "./warmer.js"
+
 export const DEFAULT_PROMPT =
   "This is a keep-alive request. Do not perform any work or use tools. Reply with exactly: OK"
 
 export const DEFAULT_INTERVAL = 4 * 60_000
 
 export const DEFAULT_DURATION = 30 * 60_000
-
-export interface WarmerSettings {
-  readonly prompt: string
-  readonly interval: number
-  readonly duration: number
-}
 
 export type ParsedOptions =
   | { readonly ok: true; readonly settings: WarmerSettings }
@@ -64,6 +60,22 @@ function describe(value: unknown): string {
   return typeof value === "string" ? JSON.stringify(value) : String(value)
 }
 
+export function parseModelRules(value: unknown): ModelRule[] | undefined {
+  if (value === undefined) return []
+  const entries = typeof value === "string" ? [value] : Array.isArray(value) ? value : undefined
+  if (entries === undefined) return undefined
+  const rules: ModelRule[] = []
+  for (const entry of entries) {
+    if (typeof entry !== "string" || entry.trim().length === 0) return undefined
+    const trimmed = entry.trim()
+    const exclude = trimmed.startsWith("!")
+    const pattern = exclude ? trimmed.slice(1).trim() : trimmed
+    if (pattern.length === 0) return undefined
+    rules.push({ pattern, exclude })
+  }
+  return rules
+}
+
 export function parseOptions(options: Readonly<Record<string, unknown>> | undefined): ParsedOptions {
   const raw = options ?? {}
   if (raw.enabled === false) return { ok: false }
@@ -82,5 +94,12 @@ export function parseOptions(options: Readonly<Record<string, unknown>> | undefi
     }
   }
   const prompt = typeof raw.prompt === "string" && raw.prompt.trim().length > 0 ? raw.prompt : DEFAULT_PROMPT
-  return { ok: true, settings: { prompt, interval, duration } }
+  const models = parseModelRules(raw.models)
+  if (models === undefined) {
+    return {
+      ok: false,
+      warning: `prompt cache warming is disabled: models must be a string or an array of non-empty strings, got ${describe(raw.models)}`,
+    }
+  }
+  return { ok: true, settings: { prompt, interval, duration, models } }
 }
