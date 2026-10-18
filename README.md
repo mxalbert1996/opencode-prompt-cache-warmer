@@ -37,12 +37,22 @@ on warms every session twice.
 
 ### The plugin must be last in `plugins`
 
-Hook callbacks run in registration order, and configured packages activate
-after built-ins. So last-in-config is last-to-run, and only then does this
-plugin see the fully assembled request. If it is not last, the captured
-snapshot is incomplete and the warm request misses part of the cache —
-degraded, never corrupt: the real turn is unaffected, the warm request is
-simply less useful.
+Hook callbacks run in registration order, and activation is serial: built-in
+request-shaping plugins, then SDK and instance plugins, then configured packages
+in config order, then a trailing group of built-in config plugins that derive
+their contributions from configuration (instructions, agents, commands,
+providers, skills, and similar).
+
+So last-in-config makes this plugin last among **configured** plugins, which is
+the part that matters: it sees everything the other configured plugins
+contributed to the request. The trailing group can still register after it, but
+none of those plugins register a `context` hook, so the captured snapshot is
+complete.
+
+The guarantee is "last among configured plugins," not "last overall." If it is
+not last, the captured snapshot is incomplete and the warm request misses part
+of the cache — degraded, never corrupt: the real turn is unaffected, the warm
+request is simply less useful.
 
 ## Options
 
